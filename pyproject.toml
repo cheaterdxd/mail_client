@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mail_client"
+version = "0.1.0"
+description = "A small mail client application scaffold"
+readme = "README.md"
+authors = [ { name = "Your Name" } ]
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+
+[project.urls]
+"Homepage" = ""
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203"]

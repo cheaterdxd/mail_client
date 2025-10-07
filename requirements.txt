@@ -1,0 +1,7 @@
+python-dotenv>=1.0.0
+pytest>=7.0.0
+plyer>=2.0.0
+
+# Add runtime dependencies here, e.g.
+# requests>=2.0.0
+
