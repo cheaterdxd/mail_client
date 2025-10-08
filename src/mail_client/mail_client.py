@@ -1,16 +1,19 @@
 """
 Mail Client Application - Ứng dụng quản lý email chuyên dụng
 Tác giả: Python Senior Software Engineer
-Phiên bản: 1.0.0
+Phiên bản: 2.0.0 - Enhanced Error Handling
 """
 
 import poplib
+import imaplib
 import smtplib
 import ssl
 import os
 import re
 import time
-from email import message_from_bytes, policy
+import traceback
+import sys
+from email import message_from_bytes, message_from_string, policy
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -20,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional
 from dotenv import load_dotenv
+import socket
 
 try:
     from plyer import notification
@@ -29,6 +33,59 @@ except ImportError:
     PLYER_AVAILABLE = False
     print("⚠️  Thư viện 'plyer' chưa được cài đặt. Thông báo desktop sẽ không khả dụng.")
     print("   Cài đặt bằng lệnh: pip install plyer")
+
+
+# Enable debug mode từ biến môi trường
+DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
+
+
+def log_error(error_msg: str, exception: Exception = None, show_trace: bool = True):
+    """
+    Log lỗi chi tiết với traceback
+
+    Args:
+        error_msg: Thông báo lỗi
+        exception: Exception object
+        show_trace: Có hiển thị traceback không
+    """
+    print(f"\n{'='*70}")
+    print(f"❌ LỖI: {error_msg}")
+    print(f"{'='*70}")
+
+    if exception:
+        print(f"🔍 Loại lỗi: {type(exception).__name__}")
+        print(f"📝 Chi tiết: {str(exception)}")
+
+    if show_trace and (DEBUG_MODE or exception):
+        print(f"\n📍 TRACEBACK:")
+        print(f"{'-'*70}")
+        if exception:
+            traceback.print_exc()
+        else:
+            traceback.print_stack()
+        print(f"{'-'*70}")
+
+    print(f"{'='*70}\n")
+
+
+def safe_execute(func, error_msg: str, *args, **kwargs):
+    """
+    Thực thi function với error handling an toàn
+
+    Args:
+        func: Function cần thực thi
+        error_msg: Thông báo lỗi nếu thất bại
+        *args, **kwargs: Arguments cho function
+
+    Returns:
+        Tuple (success: bool, result: any)
+    """
+    try:
+        result = func(*args, **kwargs)
+        return True, result
+    except Exception as e:
+        log_error(error_msg, e)
+        return False, None
 
 
 class MailClient:
@@ -61,12 +118,15 @@ class MailClient:
         self.mail_user = os.getenv("MAIL_USER")
         self.mail_pass = os.getenv("MAIL_PASS")
 
+        # Auto-detect protocol dựa vào port
+        self.protocol = self._detect_protocol(self.mail_port)
+
         # Kiểm tra cấu hình
         if not all([self.mail_host, self.smtp_server, self.mail_user, self.mail_pass]):
             raise ValueError("❌ Thiếu thông tin cấu hình trong file .env")
 
         # Thiết lập thư mục lưu trữ
-        self.storage_dir = Path("emails_offline")
+        self.storage_dir = Path("D:\\root_folder\\rieng\\emails_offline")
         self.storage_dir.mkdir(exist_ok=True)
 
         # File theo dõi UID đã tải
@@ -95,6 +155,20 @@ class MailClient:
             print("   Sử dụng cấu hình mặc định")
 
         print("✅ Mail Client đã sẵn sàng!")
+        print(f"📧 Protocol: {self.protocol.upper()}")
+
+    def _detect_protocol(self, port: int) -> str:
+        """
+        Tự động phát hiện protocol dựa vào port
+        """
+        if port == 993 or port == 143:
+            return "imap"
+        elif port == 995 or port == 110:
+            return "pop3"
+        else:
+            # Mặc định POP3
+            print(f"⚠️  Port {port} không chuẩn, giả định dùng POP3")
+            return "pop3"
 
     def _load_seen_uids(self) -> set:
         """Đọc danh sách UID đã tải từ file"""
@@ -288,15 +362,194 @@ class MailClient:
 
         # Thông tin SSL context hiện tại
         print(f"\n📋 Cấu hình hiện tại:")
+        print(f"   Protocol: {self.protocol.upper()}")
         print(f"   Cipher level: {self.cipher_level}")
         print(f"   Min TLS version: {self.ssl_context.minimum_version}")
         print(f"   Cipher suites: {len(self.ssl_context.get_ciphers())} available")
 
-        # Test kết nối POP3
-        print(f"\n🔌 Đang test kết nối POP3 tới {self.mail_host}:{self.mail_port}...")
+        # Test kết nối dựa vào protocol
+        if self.protocol == "imap":
+            print(
+                f"\n🔌 Đang test kết nối IMAP tới {self.mail_host}:{self.mail_port}..."
+            )
+            self._diagnose_imap()
+        else:
+            print(
+                f"\n🔌 Đang test kết nối POP3 tới {self.mail_host}:{self.mail_port}..."
+            )
+            self._diagnose_pop3()
 
+    def _diagnose_imap(self):
+        """Chẩn đoán kết nối IMAP"""
         test_results = []
         cipher_modes = ["strict", "auto", "legacy"]
+
+        for mode in cipher_modes:
+            try:
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+                cipher_configs = {
+                    "strict": "DEFAULT:@SECLEVEL=2",
+                    "auto": "DEFAULT:@SECLEVEL=1",
+                    "legacy": "ALL:@SECLEVEL=0",
+                }
+                ctx.set_ciphers(cipher_configs[mode])
+
+                with poplib.POP3_SSL(
+                    self.mail_host, self.mail_port, context=ctx, timeout=10
+                ) as conn:
+                    conn.user(self.mail_user)
+                    conn.pass_(self.mail_pass)
+                    test_results.append((mode, "✅ Thành công"))
+                    print(f"   [{mode}] ✅ Kết nối thành công")
+
+            except poplib.error_proto as e:
+                test_results.append((mode, f"❌ Auth Error: {str(e)[:50]}"))
+                print(f"   [{mode}] ⚠️  Kết nối OK nhưng lỗi xác thực")
+            except ssl.SSLError as e:
+                test_results.append((mode, f"❌ SSL Error: {str(e)[:50]}"))
+                print(f"   [{mode}] ❌ Lỗi SSL")
+            except Exception as e:
+                test_results.append((mode, f"❌ {str(e)[:50]}"))
+                print(f"   [{mode}] ❌ Lỗi khác")
+
+                # Test kết nối IMAP
+                conn = imaplib.IMAP4_SSL(
+                    self.mail_host, self.mail_port, ssl_context=ctx, timeout=10
+                )
+
+                # Test login
+                conn.login(self.mail_user, self.mail_pass)
+                conn.logout()
+
+                test_results.append((mode, "✅ Thành công"))
+                print(f"   [{mode}] ✅ Kết nối và xác thực thành công")
+
+            except imaplib.IMAP4.error as e:
+                error_msg = str(e)
+                print(f"   [{mode}] ❌ Lỗi IMAP: {error_msg[:60]}")
+
+                if DEBUG_MODE:
+                    print(f"        Traceback:")
+                    traceback.print_exc()
+
+                if "authenticate" in error_msg.lower() or "login" in error_msg.lower():
+                    test_results.append(
+                        (mode, f"⚠️  SSL OK, Auth failed: {error_msg[:40]}")
+                    )
+                else:
+                    test_results.append((mode, f"❌ IMAP Error: {error_msg[:50]}"))
+
+            except ssl.SSLError as e:
+                error_msg = str(e)
+                print(f"   [{mode}] ❌ Lỗi SSL: {error_msg[:60]}")
+
+                if DEBUG_MODE:
+                    print(f"        Traceback:")
+                    traceback.print_exc()
+
+                test_results.append((mode, f"❌ SSL Error: {error_msg[:50]}"))
+
+            except socket.timeout:
+                print(f"   [{mode}] ❌ Timeout - Server không phản hồi")
+                test_results.append((mode, "❌ Connection timeout"))
+
+            except socket.gaierror as e:
+                print(f"   [{mode}] ❌ Không resolve được hostname: {e}")
+                test_results.append((mode, f"❌ DNS Error: {e}"))
+
+            except ConnectionRefusedError:
+                print(f"   [{mode}] ❌ Kết nối bị từ chối")
+                test_results.append((mode, "❌ Connection refused"))
+
+            except Exception as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+                print(f"   [{mode}] ❌ Lỗi {error_type}: {error_msg[:60]}")
+
+                if DEBUG_MODE:
+                    print(f"        Full traceback:")
+                    traceback.print_exc()
+
+                test_results.append((mode, f"❌ {error_type}: {error_msg[:40]}"))
+
+        self._print_diagnosis_results(test_results)
+
+    def _print_diagnosis_results(self, test_results):
+        """In kết quả chẩn đoán"""
+
+        # self._print_diagnosis_results(test_results)
+        print("\n📊 KẾT QUẢ:")
+        for mode, result in test_results:
+            print(f"   [{mode}] {result}")
+
+    def _diagnose_pop3(self):
+        """Chẩn đoán kết nối POP3"""
+        test_results = []
+        cipher_modes = ["strict", "auto", "legacy"]
+
+        for mode in cipher_modes:
+            try:
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+                cipher_configs = {
+                    "strict": "DEFAULT:@SECLEVEL=2",
+                    "auto": "DEFAULT:@SECLEVEL=1",
+                    "legacy": "ALL:@SECLEVEL=0",
+                }
+                ctx.set_ciphers(cipher_configs[mode])
+
+                # Test kết nối POP3
+                conn = poplib.POP3_SSL(
+                    self.mail_host, self.mail_port, context=ctx, timeout=10
+                )
+
+                # Test login
+                conn.user(self.mail_user)
+                conn.pass_(self.mail_pass)
+                conn.quit()
+
+                test_results.append((mode, "✅ Thành công"))
+                print(f"   [{mode}] ✅ Kết nối thành công")
+
+            except poplib.error_proto as e:
+                error_msg = str(e)
+                print(f"   [{mode}] ❌ Lỗi POP3: {error_msg[:60]}")
+
+                if DEBUG_MODE:
+                    print(f"        Traceback:")
+                    traceback.print_exc()
+
+                test_results.append((mode, f"❌ Auth Error: {error_msg[:50]}"))
+
+            except ssl.SSLError as e:
+                error_msg = str(e)
+                print(f"   [{mode}] ❌ Lỗi SSL: {error_msg[:60]}")
+
+                if DEBUG_MODE:
+                    print(f"        Traceback:")
+                    traceback.print_exc()
+
+                test_results.append((mode, f"❌ SSL Error: {error_msg[:50]}"))
+
+            except socket.timeout:
+                print(f"   [{mode}] ❌ Timeout")
+                test_results.append((mode, "❌ Timeout"))
+
+            except Exception as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+                print(f"   [{mode}] ❌ Lỗi {error_type}: {error_msg[:60]}")
+
+                if DEBUG_MODE:
+                    print(f"        Full traceback:")
+                    traceback.print_exc()
+
+                test_results.append((mode, f"❌ {error_type}: {error_msg[:40]}"))
+
+        self._print_diagnosis_results(test_results)
 
         for mode in cipher_modes:
             try:
@@ -354,12 +607,301 @@ class MailClient:
 
         print("=" * 60)
 
+    def test_raw_connection(self):
+        """
+        Test kết nối socket thuần túy để phát hiện vấn đề mạng
+        """
+        print("\n🔌 TEST KẾT NỐI CƠ BẢN")
+        print("=" * 60)
+
+        # Test 1: TCP Connection
+        print(f"\n1️⃣  Test TCP đến {self.mail_host}:{self.mail_port}...")
+        try:
+            sock = socket.create_connection(
+                (self.mail_host, self.mail_port), timeout=10
+            )
+            print("   ✅ Kết nối TCP thành công")
+            sock.close()
+        except socket.timeout:
+            print("   ❌ Timeout - Server không phản hồi")
+            return
+        except socket.gaierror:
+            print("   ❌ Không thể resolve hostname")
+            return
+        except ConnectionRefusedError:
+            print("   ❌ Kết nối bị từ chối - Kiểm tra port")
+            return
+        except Exception as e:
+            print(f"   ❌ Lỗi: {e}")
+            return
+
+        # Test 2: SSL/TLS Handshake với các version khác nhau
+        print(f"\n2️⃣  Test SSL/TLS Handshake ({self.protocol.upper()})...")
+        tls_versions = [
+            (ssl.TLSVersion.TLSv1_3, "TLS 1.3"),
+            (ssl.TLSVersion.TLSv1_2, "TLS 1.2"),
+            (ssl.TLSVersion.TLSv1_1, "TLS 1.1"),
+            (ssl.TLSVersion.TLSv1, "TLS 1.0"),
+        ]
+
+        working_versions = []
+        for tls_ver, name in tls_versions:
+            try:
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = tls_ver
+                ctx.maximum_version = tls_ver
+                ctx.set_ciphers("ALL:@SECLEVEL=0")
+
+                sock = socket.create_connection(
+                    (self.mail_host, self.mail_port), timeout=10
+                )
+                ssl_sock = ctx.wrap_socket(sock, server_hostname=self.mail_host)
+
+                print(
+                    f"   ✅ {name}: {ssl_sock.version()} - Cipher: {ssl_sock.cipher()[0]}"
+                )
+                working_versions.append(name)
+
+                ssl_sock.close()
+            except ssl.SSLError as e:
+                print(f"   ❌ {name}: {str(e)[:60]}")
+            except Exception as e:
+                print(f"   ⚠️  {name}: {str(e)[:60]}")
+
+        # Test 3: Cipher Suites
+        print(f"\n3️⃣  Test Cipher Suites...")
+        cipher_tests = [
+            ("DEFAULT:@SECLEVEL=2", "Modern (SECLEVEL=2)"),
+            ("DEFAULT:@SECLEVEL=1", "Balanced (SECLEVEL=1)"),
+            ("ALL:@SECLEVEL=0", "Legacy (SECLEVEL=0)"),
+            ("ECDHE-RSA-AES128-GCM-SHA256", "Specific: ECDHE-RSA-AES128-GCM-SHA256"),
+            ("AES128-SHA", "Specific: AES128-SHA"),
+        ]
+
+        working_ciphers = []
+        for cipher_str, name in cipher_tests:
+            try:
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                ctx.set_ciphers(cipher_str)
+
+                sock = socket.create_connection(
+                    (self.mail_host, self.mail_port), timeout=10
+                )
+                ssl_sock = ctx.wrap_socket(sock, server_hostname=self.mail_host)
+
+                actual_cipher = ssl_sock.cipher()[0]
+                print(f"   ✅ {name}")
+                print(f"      → Actual: {actual_cipher}")
+                working_ciphers.append(name)
+
+                ssl_sock.close()
+            except ssl.SSLError as e:
+                print(f"   ❌ {name}")
+            except Exception as e:
+                print(f"   ⚠️  {name}: {str(e)[:40]}")
+
+        # Tổng kết
+        print("\n" + "=" * 60)
+        print("📋 TỔNG KẾT:")
+        print("-" * 60)
+
+        if working_versions:
+            print(f"✅ TLS versions hoạt động: {', '.join(working_versions)}")
+        else:
+            print("❌ Không có TLS version nào hoạt động")
+
+        if working_ciphers:
+            print(f"✅ Cipher suites hoạt động: {len(working_ciphers)}")
+            # print(f"✅ Khuyến nghị: Dùng {cipher_tests[working_ciphers[0]][0]}")
+            print(f"✅ Khuyến nghị: Dùng {working_ciphers[0]}")
+        else:
+            print("❌ Không có cipher suite nào hoạt động")
+
+        print("=" * 60)
+
     def fetch_new_emails(self) -> int:
         """
-        Kết nối đến server POP3, tải về và lưu các email mới
+        Kết nối đến server (POP3 hoặc IMAP), tải về và lưu các email mới
 
         Returns:
             Số lượng email mới đã tải
+        """
+        if self.protocol == "imap":
+            return self._fetch_new_emails_imap()
+        else:
+            return self._fetch_new_emails_pop3()
+
+    def _fetch_new_emails_imap(self) -> int:
+        """
+        Tải email qua IMAP
+        """
+        new_count = 0
+
+        try:
+            # Kết nối IMAP với SSL
+            with imaplib.IMAP4_SSL(
+                self.mail_host, self.mail_port, ssl_context=self.ssl_context
+            ) as imap_conn:
+                imap_conn.login(self.mail_user, self.mail_pass)
+
+                # Chọn INBOX
+                imap_conn.select("INBOX")
+
+                # Tìm tất cả email chưa đọc (hoặc tất cả)
+                # Dùng 'ALL' để lấy tất cả, 'UNSEEN' để chỉ lấy chưa đọc
+                status, messages = imap_conn.search(None, "ALL")
+
+                if status != "OK":
+                    print("❌ Không thể tìm kiếm email")
+                    return 0
+
+                email_ids = messages[0].split()
+
+                if not email_ids:
+                    print("📭 Không có email nào trong hộp thư")
+                    return 0
+
+                print(f"📬 Tìm thấy {len(email_ids)} email trên server")
+
+                # Duyệt qua từng email
+                for email_id in email_ids:
+                    email_id_str = email_id.decode()
+
+                    # Kiểm tra đã tải chưa (dùng email_id làm UID)
+                    if email_id_str in self.seen_uids:
+                        continue
+
+                    # Tải email
+                    status, msg_data = imap_conn.fetch(email_id, "(RFC822)")
+
+                    if status != "OK":
+                        print(f"⚠️  Không thể tải email {email_id_str}")
+                        continue
+
+                    # Parse email
+                    raw_email = msg_data[0][1]
+                    msg = message_from_bytes(raw_email, policy=policy.default)
+
+                    # Giải mã thông tin
+                    from_addr = self._decode_header_value(msg.get("From", ""))
+                    subject = self._decode_header_value(
+                        msg.get("Subject", "No Subject")
+                    )
+                    date = msg.get("Date", "")
+
+                    print(f"\n📧 Email mới #{email_id_str}")
+                    print(f"   Từ: {from_addr}")
+                    print(f"   Tiêu đề: {subject}")
+                    print(f"   Ngày: {date}")
+
+                    # Tạo thư mục lưu trữ
+                    folder_name = f"{email_id_str}_{self._sanitize_filename(subject)}"
+
+                    # Chuẩn hóa tên thư mục để an toàn trên Windows/Linux
+                    def _sanitize_folder_component(
+                        name: str, max_len: int = 240
+                    ) -> str:
+                        if not name:
+                            return "no_subject"
+
+                        # Loại bỏ ký tự điều khiển (control chars)
+                        name = "".join(ch for ch in name if ord(ch) >= 32)
+
+                        # Thay các đường phân cách hệ thống và ký tự ALT sep bằng dấu gạch dưới
+                        name = name.replace(os.path.sep, "_")
+                        if os.path.altsep:
+                            name = name.replace(os.path.altsep, "_")
+
+                        # Loại bỏ các ký tự không hợp lệ chung (Windows và POSIX)
+                        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+
+                        # Gom nhiều khoảng trắng thành một và trim đầu-cuối
+                        name = re.sub(r"\s+", " ", name).strip()
+
+                        # Windows không cho phép tên kết thúc bằng dấu chấm hoặc khoảng trắng
+                        name = name.rstrip(" .")
+
+                        # Tránh các tên reserved trên Windows
+                        reserved = {
+                            "CON",
+                            "PRN",
+                            "AUX",
+                            "NUL",
+                            "COM1",
+                            "COM2",
+                            "COM3",
+                            "COM4",
+                            "COM5",
+                            "COM6",
+                            "COM7",
+                            "COM8",
+                            "COM9",
+                            "LPT1",
+                            "LPT2",
+                            "LPT3",
+                            "LPT4",
+                            "LPT5",
+                            "LPT6",
+                            "LPT7",
+                            "LPT8",
+                            "LPT9",
+                        }
+                        if name.upper() in reserved or name in {".", "..", ""}:
+                            name = f"_{name}"
+
+                        # Giới hạn độ dài an toàn (đa số FS chấp nhận ~255, giữ trừ đi phần còn lại)
+                        if len(name) > max_len:
+                            name = name[:max_len].rstrip(" .")
+
+                        return name or "no_subject"
+
+                    folder_name = _sanitize_folder_component(folder_name)
+                    email_folder = self.storage_dir / folder_name
+                    email_folder.mkdir(exist_ok=True)
+
+                    # Lưu file .eml gốc
+                    eml_file = email_folder / "full_email.eml"
+                    with open(eml_file, "wb") as f:
+                        f.write(raw_email)
+
+                    # Trích xuất đính kèm
+                    attachment_count = self._extract_attachments(msg, email_folder)
+
+                    # Đánh dấu đã tải
+                    self._save_seen_uid(email_id_str)
+                    new_count += 1
+
+                    # Hiển thị thông báo desktop
+                    if PLYER_AVAILABLE:
+                        try:
+                            notification.notify(
+                                title=f"📧 Email mới từ {from_addr[:30]}",
+                                message=subject[:100],
+                                app_name="Mail Client",
+                                timeout=10,
+                            )
+                        except:
+                            pass
+
+                print(f"\n✅ Đã tải về {new_count} email mới")
+
+        except imaplib.IMAP4.error as e:
+            print(f"❌ Lỗi IMAP: {e}")
+        except ssl.SSLError as e:
+            print(f"❌ Lỗi SSL: {e}")
+            print("\n🔧 GỢI Ý KHẮC PHỤC:")
+            print("1. Server có thể yêu cầu cipher suite cũ")
+            print("2. Thử khởi động lại với: python mail_client.py legacy")
+            print("3. Kiểm tra server có hỗ trợ TLS 1.2 trở lên")
+        except Exception as e:
+            print(f"❌ Lỗi không xác định: {e}")
+
+        return new_count
+
+    def _fetch_new_emails_pop3(self) -> int:
+        """
+        Tải email qua POP3 (code gốc)
         """
         new_count = 0
 
@@ -590,10 +1132,12 @@ class MailClient:
             print("2. 📥 Kiểm tra và tải email mới")
             print("3. 📖 Đọc email đã lưu (Offline)")
             print("4. 🔄 Bắt đầu giám sát tự động")
-            print("5. 🚪 Thoát")
+            print("5. 🔍 Chẩn đoán kết nối SSL (Nhanh)")
+            print("6. 🔬 Test kết nối chi tiết (Nâng cao)")
+            print("7. 🚪 Thoát")
             print("=" * 60)
 
-            choice = input("\nChọn chức năng (1-5): ").strip()
+            choice = input("\nChọn chức năng (1-7): ").strip()
 
             if choice == "1":
                 self._send_email_interactive()
@@ -605,6 +1149,10 @@ class MailClient:
             elif choice == "4":
                 self.auto_monitor()
             elif choice == "5":
+                self.diagnose_ssl_connection()
+            elif choice == "6":
+                self.test_raw_connection()
+            elif choice == "7":
                 print("\n👋 Cảm ơn bạn đã sử dụng Mail Client!")
                 break
             else:
@@ -647,34 +1195,76 @@ class MailClient:
 
 def main():
     """
-    Hàm main để khởi chạy ứng dụng
+    Hàm main để khởi chạy ứng dụng với error handling toàn diện
     """
     print("=" * 60)
-    print("🚀 MAIL CLIENT APPLICATION v1.0.0")
+    print("🚀 MAIL CLIENT APPLICATION v2.0.0")
     print("=" * 60)
+
+    if DEBUG_MODE:
+        print("🔍 DEBUG MODE: ENABLED")
+        print("=" * 60)
 
     # Kiểm tra file .env
     if not os.path.exists(".env"):
         print("\n❌ Không tìm thấy file .env")
         print("\nVui lòng tạo file .env với nội dung:")
         print("-" * 60)
-        print("MAIL_HOST=your.pop3.server.com")
-        print("MAIL_PORT=995")
+        print("MAIL_HOST=your.mail.server.com")
+        print("MAIL_PORT=993")
         print("SMTP_SERVER=your.smtp.server.com")
         print("SMTP_PORT=465")
         print("MAIL_USER=your_email@example.com")
         print("MAIL_PASS=your_password")
         print("-" * 60)
+        print("\n💡 Tips:")
+        print("   - Port 993: IMAP SSL")
+        print("   - Port 995: POP3 SSL")
+        print("   - Port 143: IMAP")
+        print("   - Port 110: POP3")
         return
 
     try:
-        client = MailClient()
+        # Có thể truyền tham số cipher_level khi khởi tạo
+        import sys
+
+        cipher_level = sys.argv[1] if len(sys.argv) > 1 else "auto"
+
+        if cipher_level not in ["auto", "strict", "legacy"]:
+            print(f"⚠️  Cipher level '{cipher_level}' không hợp lệ")
+            print("   Sử dụng: auto, strict, hoặc legacy")
+            print("   Mặc định: auto")
+            cipher_level = "auto"
+
+        print(f"\n🔐 Đang khởi tạo với cipher level: {cipher_level}")
+
+        client = MailClient(cipher_level=cipher_level)
         client.run()
+
     except ValueError as e:
-        print(f"\n{e}")
-        print("\nVui lòng kiểm tra lại file .env")
+        log_error("Lỗi cấu hình", e, show_trace=False)
+        print("\n💡 Gợi ý:")
+        print("   1. Kiểm tra file .env có đầy đủ thông tin")
+        print("   2. Đảm bảo các giá trị không có dấu cách thừa")
+        print("   3. Port phải là số")
+
+    except KeyboardInterrupt:
+        print("\n\n⏹️  Người dùng đã dừng chương trình")
+
+    except RecursionError as e:
+        log_error("Lỗi đệ quy vô hạn", e)
+        print("\n🐛 Debug Info:")
+        print("   Có vẻ như code bị lỗi logic gây đệ quy")
+        print("   Vui lòng báo lỗi này cho developer")
+
     except Exception as e:
-        print(f"\n❌ Lỗi khởi động ứng dụng: {e}")
+        log_error("Lỗi không xác định", e)
+        print("\n💡 Gợi ý:")
+        print("   1. Bật DEBUG_MODE để xem chi tiết:")
+        print("      export DEBUG_MODE=true")
+        print("      python mail_client.py")
+        print("   2. Kiểm tra kết nối internet")
+        print("   3. Kiểm tra file .env")
 
 
 if __name__ == "__main__":
